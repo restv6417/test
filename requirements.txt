@@ -1,0 +1,2 @@
+pyaudiowpatch>=0.2.12
+numpy>=1.21.0
