@@ -150,8 +150,11 @@ def record(args):
         print(f"Rate    : {rate} Hz")
         print(f"Channels: {channels} ({'stereo' if channels >= 2 else 'mono'})")
         print(f"Output  : {outfile}")
-        if args.mic:
+        use_mic = not args.no_mic
+        if use_mic:
             print("Mic mix : enabled")
+        else:
+            print("Mic mix : disabled (--no-mic)")
         print()
         print("Recording... Press Ctrl+C to stop.\n")
 
@@ -184,7 +187,7 @@ def record(args):
         mic_stream = None
         mic_rate = rate
 
-        if args.mic:
+        if use_mic:
             try:
                 mic_info = (
                     p.get_device_info_by_index(args.mic_device)
@@ -237,7 +240,7 @@ def record(args):
             return
 
         # --- Build final audio data ---
-        if args.mic and mic_frames:
+        if use_mic and mic_frames:
             audio_data = mix_audio(system_frames, mic_frames, channels, rate, mic_rate)
         else:
             audio_data = b"".join(system_frames)
@@ -270,8 +273,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python audio_recorder.py                     # Record system audio (default device)
-  python audio_recorder.py --mic               # System audio + microphone mixed
+  python audio_recorder.py                     # Record system audio + mic (default)
+  python audio_recorder.py --no-mic            # System audio only (no microphone)
   python audio_recorder.py --list              # Show available devices
   python audio_recorder.py --device 5          # Use specific loopback device
   python audio_recorder.py --output meetings   # Save to custom folder
@@ -281,8 +284,8 @@ Examples:
                         help="List available audio devices and exit")
     parser.add_argument("--device", "-d", type=int, default=None, metavar="INDEX",
                         help="Loopback device index (see --list; default: system default output)")
-    parser.add_argument("--mic", "-m", action="store_true",
-                        help="Mix microphone input into the recording")
+    parser.add_argument("--no-mic", action="store_true",
+                        help="Disable microphone mixing (mic is on by default)")
     parser.add_argument("--mic-device", type=int, default=None, metavar="INDEX",
                         help="Microphone device index (see --list; default: system default mic)")
     parser.add_argument("--output", "-o", default="recordings", metavar="DIR",
