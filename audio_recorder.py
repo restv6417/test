@@ -21,12 +21,46 @@ except ImportError:
     print("pyaudiowpatch not found. Install with:\n  pip install pyaudiowpatch")
     sys.exit(1)
 
+try:
+    from ctypes import cast, POINTER
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    _PYCAW_AVAILABLE = True
+except ImportError:
+    _PYCAW_AVAILABLE = False
+
 CHUNK = 512
 FORMAT = pyaudio.paInt16
 SAMPLE_WIDTH = 2          # int16 = 2 bytes
 TARGET_RATE = 16000       # Whisper's native sample rate
 
 DEFAULT_OUTPUT = str(Path.home() / "Desktop" / "recordings")
+
+
+# ---------------------------------------------------------------------------
+# Volume / mute check
+# ---------------------------------------------------------------------------
+
+def check_audio_volume():
+    """Warn if the system output is muted or at 0% volume."""
+    if not _PYCAW_AVAILABLE:
+        return
+    try:
+        speakers = AudioUtilities.GetSpeakers()
+        iface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        vol = cast(iface, POINTER(IAudioEndpointVolume))
+        is_muted = bool(vol.GetMute())
+        level = vol.GetMasterVolumeLevelScalar()  # 0.0 – 1.0
+    except Exception:
+        return
+
+    if is_muted:
+        print("WARNING: システム音声がミュートされています。")
+        print("         録音は実行されますが、ファイルは無音になります。")
+        print("         ミュートを解除してから録音してください。\n")
+    elif level == 0.0:
+        print("WARNING: システム音量が 0% です。")
+        print("         録音ファイルは無音になります。\n")
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +206,7 @@ def record(args):
         print(f"Output  : {outfile}")
         print(f"Mic mix : {'enabled' if use_mic else 'disabled (--no-mic)'}")
         print()
+        check_audio_volume()
         print("Recording... Press Ctrl+C to stop.\n")
 
         system_frames = []
