@@ -1,3 +1,4 @@
 pyaudiowpatch>=0.2.12
 numpy>=1.21.0
 pycaw>=20230407
+pywinauto>=0.6.8
