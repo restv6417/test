@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Join a Teams meeting from the command line.
-Opens the Teams desktop app and auto-clicks the Join button.
+Opens the Teams desktop app, optionally mutes the mic, then auto-clicks Join.
 
 Usage:
   python join_meeting.py "https://teams.microsoft.com/l/meetup-join/..."
@@ -29,8 +29,54 @@ def open_teams(url):
         sys.exit(1)
 
 
-def auto_join(timeout=40):
-    """Wait for Teams pre-join screen and click the Join button."""
+def _find_teams_windows(desktop):
+    return desktop.windows(title_re=".*(Teams|チーム).*", visible_only=True)
+
+
+def mute_mic_if_on(win):
+    """
+    Mute the microphone on the pre-join screen if it is currently ON.
+    Teams button title == the ACTION (what clicking does):
+      "Mute microphone"        → mic is ON  → click to mute
+      "Unmute microphone"      → mic is OFF → nothing to do
+    """
+    # Titles that indicate mic is currently ON (clicking will mute it)
+    MIC_ON_TITLES = (
+        "Mute microphone",
+        "マイクをミュートにする",
+        "Mute",
+    )
+    # Titles that confirm mic is already OFF
+    MIC_OFF_TITLES = (
+        "Unmute microphone",
+        "マイクのミュートを解除する",
+        "Unmute",
+    )
+
+    for title in MIC_ON_TITLES:
+        try:
+            btn = win.child_window(title=title, control_type="Button")
+            if btn.exists(timeout=0.5):
+                btn.click_input()
+                print("  Mic: ON → muted")
+                return
+        except Exception:
+            continue
+
+    for title in MIC_OFF_TITLES:
+        try:
+            btn = win.child_window(title=title, control_type="Button")
+            if btn.exists(timeout=0.5):
+                print("  Mic: already muted")
+                return
+        except Exception:
+            continue
+
+    print("  Mic: state unknown — check manually")
+
+
+def auto_join(timeout=40, mic_off=True):
+    """Wait for Teams pre-join screen, configure mic, then click Join."""
     try:
         from pywinauto import Desktop
     except ImportError:
@@ -38,7 +84,6 @@ def auto_join(timeout=40):
         print("To enable auto-join:  pip install pywinauto")
         return False
 
-    # Button titles for English and Japanese Teams
     JOIN_TITLES = ("Join now", "今すぐ参加")
 
     print(f"Waiting for join screen (up to {timeout}s) ", end="", flush=True)
@@ -47,14 +92,21 @@ def auto_join(timeout=40):
     while time.time() < deadline:
         try:
             desktop = Desktop(backend="uia")
-            for win in desktop.windows(title_re=".*(Teams|チーム).*", visible_only=True):
+            for win in _find_teams_windows(desktop):
                 for title in JOIN_TITLES:
                     try:
                         btn = win.child_window(title=title, control_type="Button")
-                        if btn.exists(timeout=0.5):
-                            btn.click_input()
-                            print(f"\nJoined! (clicked '{title}')")
-                            return True
+                        if not btn.exists(timeout=0.5):
+                            continue
+
+                        print()  # newline after progress dots
+
+                        if mic_off:
+                            mute_mic_if_on(win)
+
+                        btn.click_input()
+                        print(f"  Joined! (clicked '{title}')")
+                        return True
                     except Exception:
                         continue
         except Exception:
@@ -74,11 +126,14 @@ def main():
         epilog="""
 Examples:
   python join_meeting.py "https://teams.microsoft.com/l/meetup-join/..."
+  python join_meeting.py "https://teams.microsoft.com/..." --mic-on
   python join_meeting.py "https://teams.microsoft.com/..." --no-auto-join
   python join_meeting.py "https://teams.microsoft.com/..." --timeout 60
         """,
     )
     parser.add_argument("url", help="Teams meeting URL (https:// or msteams://)")
+    parser.add_argument("--mic-on", action="store_true",
+                        help="Join with microphone ON (default: mic is muted)")
     parser.add_argument("--no-auto-join", action="store_true",
                         help="Open Teams but skip auto-clicking Join")
     parser.add_argument("--timeout", type=int, default=40, metavar="SEC",
@@ -93,9 +148,8 @@ Examples:
         print("Teams opened. Click 'Join now' to join.")
         return
 
-    # Give Teams a moment to launch before scanning for the button
     time.sleep(4)
-    auto_join(timeout=args.timeout)
+    auto_join(timeout=args.timeout, mic_off=not args.mic_on)
 
 
 if __name__ == "__main__":
