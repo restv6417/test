@@ -2,7 +2,7 @@
 """
 Windows Meeting Audio Recorder
 OS-level capture via WASAPI loopback — works with Teams, Zoom, and any app.
-Saves as WAV (PCM 16-bit) optimised for speech-to-text tools like Whisper.
+Saves as WAV 16 kHz mono — Whisper's native format, ~6x smaller than raw capture.
 """
 
 import sys
@@ -11,6 +11,7 @@ import wave
 import time
 import datetime
 import argparse
+from pathlib import Path
 
 import numpy as np
 
@@ -20,9 +21,46 @@ except ImportError:
     print("pyaudiowpatch not found. Install with:\n  pip install pyaudiowpatch")
     sys.exit(1)
 
+try:
+    from ctypes import cast, POINTER
+    from comtypes import CLSCTX_ALL
+    from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+    _PYCAW_AVAILABLE = True
+except ImportError:
+    _PYCAW_AVAILABLE = False
+
 CHUNK = 512
 FORMAT = pyaudio.paInt16
-SAMPLE_WIDTH = 2  # int16 = 2 bytes
+SAMPLE_WIDTH = 2          # int16 = 2 bytes
+TARGET_RATE = 16000       # Whisper's native sample rate
+
+DEFAULT_OUTPUT = str(Path.home() / "Desktop" / "recordings")
+
+
+# ---------------------------------------------------------------------------
+# Volume / mute check
+# ---------------------------------------------------------------------------
+
+def check_audio_volume():
+    """Warn if the system output is muted or at 0% volume."""
+    if not _PYCAW_AVAILABLE:
+        return
+    try:
+        speakers = AudioUtilities.GetSpeakers()
+        iface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        vol = cast(iface, POINTER(IAudioEndpointVolume))
+        is_muted = bool(vol.GetMute())
+        level = vol.GetMasterVolumeLevelScalar()  # 0.0 – 1.0
+    except Exception:
+        return
+
+    if is_muted:
+        print("WARNING: システム音声がミュートされています。")
+        print("         録音は実行されますが、ファイルは無音になります。")
+        print("         ミュートを解除してから録音してください。\n")
+    elif level == 0.0:
+        print("WARNING: システム音量が 0% です。")
+        print("         録音ファイルは無音になります。\n")
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +79,6 @@ def find_default_loopback(p):
     if default_out.get("isLoopbackDevice"):
         return default_out, None
 
-    # Find the loopback mirror of the default output device
     for loopback in p.get_loopback_device_info_generator():
         if default_out["name"] in loopback["name"]:
             return loopback, None
@@ -94,33 +131,50 @@ def list_devices(p):
 
 
 # ---------------------------------------------------------------------------
-# Audio mixing
+# Audio processing
 # ---------------------------------------------------------------------------
 
 def mix_audio(system_frames, mic_frames, sys_channels, sys_rate, mic_rate):
-    """Mix system loopback and microphone streams into a single buffer."""
+    """Mix system loopback and microphone, returns float32 numpy array."""
     sys_audio = np.frombuffer(b"".join(system_frames), dtype=np.int16).astype(np.float32)
     mic_audio = np.frombuffer(b"".join(mic_frames), dtype=np.int16).astype(np.float32)
 
-    # Resample mic to system rate if needed (nearest-neighbour is fine for speech)
+    # Resample mic to system rate if needed
     if mic_rate != sys_rate:
         new_len = int(len(mic_audio) * sys_rate / mic_rate)
-        indices = np.clip(
-            np.round(np.linspace(0, len(mic_audio) - 1, new_len)).astype(int),
-            0, len(mic_audio) - 1,
+        mic_audio = np.interp(
+            np.linspace(0, len(mic_audio) - 1, new_len),
+            np.arange(len(mic_audio)),
+            mic_audio,
         )
-        mic_audio = mic_audio[indices]
 
-    # Expand mono mic to stereo if the system stream is stereo
+    # Expand mono mic to match system channel count
     if sys_channels == 2:
         mic_audio = np.repeat(mic_audio.reshape(-1, 1), 2, axis=1).flatten()
 
     n = min(len(sys_audio), len(mic_audio))
-    mixed = np.clip(sys_audio[:n] + mic_audio[:n], -32768, 32767).astype(np.int16)
-    # Append any remaining system audio after mic ends
+    mixed = np.clip(sys_audio[:n] + mic_audio[:n], -32768, 32767)
     if len(sys_audio) > n:
-        mixed = np.concatenate([mixed, sys_audio[n:].astype(np.int16)])
-    return mixed.tobytes()
+        mixed = np.concatenate([mixed, sys_audio[n:]])
+    return mixed  # float32
+
+
+def to_16k_mono(audio_f32, orig_channels, orig_rate):
+    """Downsample to 16 kHz mono (Whisper's native input format)."""
+    # Stereo → mono
+    if orig_channels == 2:
+        audio_f32 = audio_f32.reshape(-1, 2).mean(axis=1)
+
+    # Resample to TARGET_RATE via linear interpolation
+    if orig_rate != TARGET_RATE:
+        new_len = int(len(audio_f32) * TARGET_RATE / orig_rate)
+        audio_f32 = np.interp(
+            np.linspace(0, len(audio_f32) - 1, new_len),
+            np.arange(len(audio_f32)),
+            audio_f32,
+        )
+
+    return np.clip(audio_f32, -32768, 32767).astype(np.int16)
 
 
 # ---------------------------------------------------------------------------
@@ -145,17 +199,14 @@ def record(args):
 
         rate = int(device_info["defaultSampleRate"])
         channels = int(device_info["maxInputChannels"])
+        use_mic = not args.no_mic
 
         print(f"\nDevice  : {device_info['name']}")
-        print(f"Rate    : {rate} Hz")
-        print(f"Channels: {channels} ({'stereo' if channels >= 2 else 'mono'})")
+        print(f"Capture : {rate} Hz {channels}ch  →  saved as {TARGET_RATE} Hz mono")
         print(f"Output  : {outfile}")
-        use_mic = not args.no_mic
-        if use_mic:
-            print("Mic mix : enabled")
-        else:
-            print("Mic mix : disabled (--no-mic)")
+        print(f"Mic mix : {'enabled' if use_mic else 'disabled (--no-mic)'}")
         print()
+        check_audio_volume()
         print("Recording... Press Ctrl+C to stop.\n")
 
         system_frames = []
@@ -169,8 +220,10 @@ def record(args):
                 system_frames.append(in_data)
             elapsed = time.time() - start_time
             m, s = divmod(int(elapsed), 60)
-            size_mb = (len(system_frames) * CHUNK * channels * SAMPLE_WIDTH) / (1024 * 1024)
-            print(f"\r  {m:02d}:{s:02d}  {size_mb:5.1f} MB", end="", flush=True)
+            # Estimate output file size (16kHz mono)
+            raw_bytes = len(system_frames) * CHUNK * channels * SAMPLE_WIDTH
+            est_mb = raw_bytes * TARGET_RATE / rate / channels / (1024 * 1024)
+            print(f"\r  {m:02d}:{s:02d}  ~{est_mb:.1f} MB", end="", flush=True)
             return (in_data, pyaudio.paContinue)
 
         sys_stream = p.open(
@@ -239,28 +292,31 @@ def record(args):
             print("No audio was captured.")
             return
 
-        # --- Build final audio data ---
-        if use_mic and mic_frames:
-            audio_data = mix_audio(system_frames, mic_frames, channels, rate, mic_rate)
-        else:
-            audio_data = b"".join(system_frames)
+        # --- Build and convert audio ---
+        print("Converting to 16 kHz mono...", end="", flush=True)
 
-        # --- Write WAV ---
+        if use_mic and mic_frames:
+            audio_f32 = mix_audio(system_frames, mic_frames, channels, rate, mic_rate)
+        else:
+            audio_f32 = np.frombuffer(
+                b"".join(system_frames), dtype=np.int16
+            ).astype(np.float32)
+
+        audio_out = to_16k_mono(audio_f32, channels, rate)
+
+        # --- Write WAV at 16 kHz mono ---
         with wave.open(outfile, "wb") as wf:
-            wf.setnchannels(channels)
+            wf.setnchannels(1)
             wf.setsampwidth(SAMPLE_WIDTH)
-            wf.setframerate(rate)
-            wf.writeframes(audio_data)
+            wf.setframerate(TARGET_RATE)
+            wf.writeframes(audio_out.tobytes())
 
         size_mb = os.path.getsize(outfile) / (1024 * 1024)
+        print(f" done")
         print(f"Saved : {outfile}  ({size_mb:.1f} MB)")
         print()
-        print("Transcription examples:")
+        print("Transcription:")
         print(f'  whisper "{outfile}" --language ja --model large-v3')
-        print(f'  whisper "{outfile}" --language ja --model medium --task transcribe')
-        print()
-        print("Format: WAV PCM 16-bit  →  natively supported by Whisper, Azure Speech,")
-        print("        Google Speech-to-Text, Amazon Transcribe, AssemblyAI, etc.")
 
 
 # ---------------------------------------------------------------------------
@@ -271,13 +327,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="Record Windows system audio (WASAPI loopback) for meeting transcription",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Examples:
   python audio_recorder.py                     # Record system audio + mic (default)
   python audio_recorder.py --no-mic            # System audio only (no microphone)
   python audio_recorder.py --list              # Show available devices
   python audio_recorder.py --device 5          # Use specific loopback device
-  python audio_recorder.py --output meetings   # Save to custom folder
+  python audio_recorder.py --output C:\\meetings
+
+Default save location: {DEFAULT_OUTPUT}
         """,
     )
     parser.add_argument("--list", "-l", action="store_true",
@@ -288,8 +346,8 @@ Examples:
                         help="Disable microphone mixing (mic is on by default)")
     parser.add_argument("--mic-device", type=int, default=None, metavar="INDEX",
                         help="Microphone device index (see --list; default: system default mic)")
-    parser.add_argument("--output", "-o", default="recordings", metavar="DIR",
-                        help="Output directory for WAV files (default: recordings/)")
+    parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT, metavar="DIR",
+                        help=f"Output directory (default: Desktop\\recordings)")
 
     args = parser.parse_args()
 
